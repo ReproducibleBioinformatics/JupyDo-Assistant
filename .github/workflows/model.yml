@@ -1,0 +1,40 @@
+# Puts the language model in a release of this repository (run by hand, once per model):
+# Qwen2.5-1.5B-Instruct, quantized GGUF published by the Qwen team on Hugging Face, at a
+# fixed revision, checked against its SHA-256, with its license file (Apache 2.0).
+# JupyDo's first_start.sh downloads it from here, never from Hugging Face.
+name: model
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPO: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+  REVISION: 91cad51170dc346986eccefdc2dd33a9da36ead9
+  FILE: qwen2.5-1.5b-instruct-q4_k_m.gguf
+  SHA256: 6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e
+  TAG: model-qwen2.5-1.5b-instruct-q4_k_m
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and check
+        run: |
+          base=https://huggingface.co/$REPO/resolve/$REVISION
+          curl -sSfL -o "$FILE" "$base/$FILE"
+          curl -sSfL -o LICENSE "$base/LICENSE"
+          echo "$SHA256  $FILE" | sha256sum -c -
+          sha256sum "$FILE" > "$FILE.sha256"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "Model: Qwen2.5-1.5B-Instruct (Q4_K_M GGUF)" \
+            --notes "Qwen2.5-1.5B-Instruct by the Qwen team (Alibaba Cloud), quantized GGUF, unchanged.
+          Source: https://huggingface.co/$REPO at revision $REVISION.
+          License: Apache License 2.0 (LICENSE, attached). SHA-256: $SHA256" \
+            "$FILE" "$FILE.sha256" LICENSE

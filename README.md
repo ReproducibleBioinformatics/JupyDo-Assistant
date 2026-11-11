@@ -12,10 +12,14 @@ quantized) served by llama.cpp, started only while someone is using the assistan
 
 `catalog.json` lists the images the assistant can suggest. It is rebuilt every 3 months
 by a GitHub Action (`.github/workflows/catalog.yml`) with `scripts/make-catalog.py`,
-from public registries and with fixed rules (no image is chosen by hand):
+from public registries and with fixed rules:
 
-- the 3000 most used tools of [BioContainers](https://biocontainers.pro) (quay.io)
+- all the tools of [BioContainers](https://biocontainers.pro) (quay.io)
 - all the images of [StaPH-B](https://github.com/StaPH-B/docker-builds) (Docker Hub)
+- all the images of a short list of trusted organizations, the makers of widely used
+  tools (Oxford Nanopore, Broad Institute, DeepVariant, QIIME 2, Bioconductor, rocker,
+  nf-core): see `TRUSTED` in the script. The list of organizations is chosen by hand,
+  the images are not.
 - the most pulled Docker Hub repositories for a set of search words (bioinformatics,
   bioconductor, cran, python, single-cell, ...): see `SEARCH_WORDS` in the script
 

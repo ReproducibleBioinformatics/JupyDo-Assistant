@@ -3,13 +3,18 @@
 registries, with the same selection rules as the large-scale test of jupydo-builder
 (scripts/bigtest/make-lists.py) and no image chosen by hand:
 
-  biocontainers  the N MOST USED tools of quay.io/biocontainers (single tools: the
+  biocontainers  ALL the tools (or the N most used) of quay.io/biocontainers (single tools: the
                  "mulled-v2-..." combinations of several packages are left out);
                  use = quay.io's popularity index of the repository or, if quay.io
                  does not give it, the total downloads of the matching Bioconda
                  package on anaconda.org; for each tool, its most recent tag
   staphb         ALL the repositories of the StaPH-B organization on Docker Hub;
                  for each, its most recent version tag
+  trusted        ALL the repositories of a short list of trusted organizations (TRUSTED:
+                 the makers of widely used tools, e.g. Oxford Nanopore, the Broad
+                 Institute, QIIME 2, Bioconductor, rocker, nf-core), or single
+                 repositories of theirs; for each, its most recent version tag. The
+                 list is chosen by hand, the images in it are not.
   dockerhub      for each search word (SEARCH_WORDS: "bioinformatics", "bioconductor",
                  "cran", "python", "single-cell", ...), the K most pulled Docker Hub repositories that have that WHOLE word in
                  their name or description (Docker Hub also returns parts of words:
@@ -27,7 +32,7 @@ Differences from make-lists.py (the catalog suggests images, it does not test th
   - no digest: JupyDo pins the image when it builds the environment.
   - the output is one JSON file, not a .tsv.
 
-Usage: scripts/make-catalog.py [--n-biocontainers 3000] [--top-dockerhub 100]
+Usage: scripts/make-catalog.py [--n-biocontainers 0 (all)] [--top-dockerhub 100]
                                [--search WORD [WORD ...]]
                                [--out catalog.json] [--workers 8]
 Needs internet (quay.io, anaconda.org, hub.docker.com). Docker Hub shows anonymous
@@ -54,6 +59,17 @@ import urllib.request
 UA = {"User-Agent": "JupyDo-assistant-catalog/1.0"}
 ARCHS = ("amd64", "arm64")   # the architectures JupyDo runs on
 SCHEMA = 1                   # version of the format of catalog.json
+# Trusted organizations, taken whole ("org", "quay.io/org") or one repository ("org/repo")
+# with the description for their repositories that have none ({name}: the repository)
+TRUSTED = {
+    "ontresearch": "Oxford Nanopore Technologies: {name}",
+    "broadinstitute": "Broad Institute: {name}",
+    "google/deepvariant": "",
+    "quay.io/qiime2": "QIIME 2 microbiome analysis platform: {name} distribution",
+    "bioconductor": "Bioconductor (R packages for genomics): {name}",
+    "rocker": "R environment (rocker project): {name}",
+    "nfcore": "nf-core pipeline container: {name}",
+}
 # Words searched on Docker Hub: the field, the languages and environments the analyses
 # run in, the kinds of data, the workflow systems ('single-cell' also finds 'single cell')
 SEARCH_WORDS = ["bioinformatics", "bioconductor", "cran", "rstudio", "r", "python", "jupyter", "genomics",
@@ -294,20 +310,36 @@ DEV_TAG = re.compile(r"(?<![a-z])(devel|develop|development|dev|test|testing|rc|
 
 
 def hub_latest(repo):
-    """Most recent tag (other than 'latest') with a linux image for amd64 or arm64,
-    and the architectures it is published for; 'latest' if there is no other. Tags of
-    development versions (devel, test, rc, beta...) only if there is nothing else."""
-    data = get(f"https://hub.docker.com/v2/repositories/{repo}/tags?page_size=50&ordering=last_updated")
+    """The tag to suggest, among the 100 most recently updated with a linux image for
+    amd64 or arm64, and the architectures it is published for. In order of preference:
+      0. a plain version number ('1.10.0', 'v2.3'): the highest
+      1. a version number with a suffix ('2.17.1-viral', '4.4-pdata-1.41'): the highest
+      2. another name: the most recent
+      3. 'latest'
+      4. a development version (devel, test, rc, beta...)
+    (big organizations have many internal tags: 'gh1100-ultima-gpu' is not a release)"""
+    data = get(f"https://hub.docker.com/v2/repositories/{repo}/tags?page_size=100&ordering=last_updated")
     time.sleep(0.5)
     def archs(t):
         return sorted({i.get("architecture") for i in t.get("images") or []
                        if i.get("os") == "linux" and i.get("architecture") in ARCHS})
-    def kind(t):   # 0 a release, 1 'latest', 2 a development tag
-        return 1 if t["name"] == "latest" else 2 if DEV_TAG.search(t["name"].lower()) else 0
-    for want in (0, 1, 2):
-        for t in data.get("results", []):
-            if kind(t) == want and archs(t):
-                return {"tag": t["name"], "archs": archs(t), "updated": (t.get("last_updated") or "")[:10]}
+    def kind(name):
+        name = name.lower()
+        if DEV_TAG.search(name):
+            return 4
+        if name == "latest":
+            return 3
+        if re.fullmatch(r"v?\d+(\.\d+)*", name):
+            return 0
+        return 1 if re.match(r"v?\d+(\.\d+)", name) else 2
+    tags = [t for t in data.get("results", []) if archs(t)]
+    for want in range(5):
+        found = [t for t in tags if kind(t["name"]) == want]
+        if found:
+            if want in (0, 1):
+                found.sort(key=lambda t: version_key(t["name"].lstrip("vV")), reverse=True)
+            t = found[0]   # otherwise the most recent (the list is by date)
+            return {"tag": t["name"], "archs": archs(t), "updated": (t.get("last_updated") or "")[:10]}
     return None
 
 
@@ -354,19 +386,20 @@ def set_biocontainers(a, stats):
             return None, "error: " + type(e).__name__
 
     ranked = sorted(use, key=lambda n: (-use[n], n))
+    want = a.n_biocontainers or len(ranked)   # 0: all
     entries, examined = [], 0
     with concurrent.futures.ThreadPoolExecutor(a.workers) as ex:
-        while len(entries) < a.n_biocontainers and examined < len(ranked):
+        while len(entries) < want and examined < len(ranked):
             # a batch at a time, in order of use: the first N usable tools, no more
-            batch = ranked[examined:examined + max(a.workers, a.n_biocontainers - len(entries))]
+            batch = ranked[examined:examined + max(a.workers, want - len(entries))]
             batch = batch[:a.workers * 8]
             examined += len(batch)
             for entry, reason in ex.map(lookup, batch):
-                if entry and len(entries) < a.n_biocontainers:
+                if entry and len(entries) < want:
                     entries.append(entry)
                 elif reason:
                     stats[reason] = stats.get(reason, 0) + 1
-            print(f"\r  {len(entries)}/{a.n_biocontainers} (looked at {examined} of {len(ranked)})",
+            print(f"\r  {len(entries)} taken (looked at {examined} of {len(ranked)})",
                   end="", file=sys.stderr)
     print(file=sys.stderr)
     stats["measure"], stats["examined"] = measure, examined
@@ -417,6 +450,66 @@ def set_staphb(a, stats):
     return entries
 
 
+def quay_text(markdown):
+    """A one-line description from quay.io's description of a repository: the
+    BioContainers summary line, else the first line of text that is not a heading."""
+    line = quay_summary(markdown)
+    if line:
+        return line
+    for line in markdown.splitlines():
+        if line.strip() and not line.lstrip().startswith(("#", "!", "[", "<", "```")):
+            return line.strip()
+    return ""
+
+
+def set_trusted(a, stats):
+    entries = []
+    for org in TRUSTED:
+        if org.startswith("quay.io/"):
+            ns = org[len("quay.io/"):]
+            for name, (popularity, markdown) in sorted(quay_repositories(ns).items()):
+                description, origin = clean(quay_text(markdown)), "quay.io"
+                if not description and TRUSTED[org]:
+                    description, origin = TRUSTED[org].format(name=name), "organization"
+                if not description:
+                    stats["no description"] = stats.get("no description", 0) + 1
+                    continue
+                try:
+                    t = quay_latest(ns, name)
+                except Exception as e:  # noqa: BLE001
+                    stats["error: " + type(e).__name__] = stats.get("error: " + type(e).__name__, 0) + 1
+                    continue
+                if not t or not t["archs"]:
+                    stats["not amd64 nor arm64"] = stats.get("not amd64 nor arm64", 0) + 1
+                    continue
+                entries.append({"source": "trusted", "organization": org, "name": name,
+                                "image": f"{org}/{name}:{t['tag']}", "repository": f"{org}/{name}",
+                                "tag": t["tag"], "updated": t["updated"], "archs": t["archs"],
+                                "description": description, "description_from": origin,
+                                "homepage": f"https://{org}/{name}", "license": "", "use": popularity or 0})
+            continue
+        if "/" in org:   # one repository
+            r = get(f"https://hub.docker.com/v2/repositories/{org}/")
+            repos = {org: (r.get("pull_count", 0), r.get("description") or "")}
+        else:
+            repos = {f"{org}/{n}": v for n, v in hub_org_repositories(org).items()}
+        for i, repo in enumerate(sorted(repos, key=lambda n: (-repos[n][0], n)), 1):
+            pulls, description = repos[repo]
+            origin = "docker hub"
+            if not clean(description) and TRUSTED[org]:
+                description, origin = TRUSTED[org].format(name=repo.split("/")[-1]), "organization"
+            e = hub_entry("trusted", repo, pulls, description, stats)
+            if e:
+                e["organization"] = org.split("/")[0]
+                if origin == "organization":
+                    e["description_from"] = origin
+                entries.append(e)
+            print(f"\r  {org}: {i}/{len(repos)}", end="", file=sys.stderr)
+        print(file=sys.stderr)
+    stats["measure"] = "Docker Hub pulls or quay.io popularity"
+    return entries
+
+
 def has_word(word, text):
     """True if the text has the whole word (any case; '-', '_' and spaces are the same):
     'cran' is in 'CRAN packages', not in 'crane'; 'single-cell' is in 'Single Cell'."""
@@ -431,6 +524,7 @@ def set_dockerhub(a, stats):
         found = hub_search(word, a.search_pages)
         ranked = sorted(((p, r, d) for r, (p, d) in found.items()
                          if not r.startswith(("staphb/", "biocontainers/")) and r not in taken
+                         and short(r) not in a.taken
                          and has_word(word, r.replace("/", " ") + " " + d)), key=lambda x: (-x[0], x[1]))
         n, examined = 0, 0
         for pulls, repo, description in ranked:
@@ -453,7 +547,7 @@ def set_dockerhub(a, stats):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--n-biocontainers", type=int, default=3000)
+    ap.add_argument("--n-biocontainers", type=int, default=0, help="the N most used BioContainers (0: all)")
     ap.add_argument("--top-dockerhub", type=int, default=100, help="Docker Hub repositories per search word")
     ap.add_argument("--search", nargs="+", default=SEARCH_WORDS, help="the words searched on Docker Hub")
     ap.add_argument("--search-pages", type=int, default=20)
@@ -488,12 +582,15 @@ def main():
     hub_login()
     print("staphb  Docker Hub, all", file=sys.stderr)
     images += run("staphb", 0, set_staphb)
+    print(f"trusted  {', '.join(TRUSTED)}", file=sys.stderr)
+    images += run("trusted", sorted(TRUSTED), set_trusted)
+    a.taken = {i["repository"] for i in images}
     print(f"dockerhub  Docker Hub search {', '.join(a.search)}, by pulls", file=sys.stderr)
     images += run("dockerhub", [a.top_dockerhub, a.search_pages, a.search], set_dockerhub)
 
-    counts = {s: sum(1 for i in images if i["source"] == s) for s in ("biocontainers", "staphb", "dockerhub")}
+    counts = {s: sum(1 for i in images if i["source"] == s) for s in ("biocontainers", "staphb", "trusted", "dockerhub")}
     catalog = {"schema": SCHEMA, "made": today, "made_by": "scripts/make-catalog.py",
-               "rules": {"n_biocontainers": a.n_biocontainers, "top_dockerhub": a.top_dockerhub,
+               "rules": {"n_biocontainers": a.n_biocontainers, "trusted": sorted(TRUSTED), "top_dockerhub": a.top_dockerhub,
                          "search": a.search, "search_pages": a.search_pages},
                "counts": counts, "left_out": stats, "images": images}
     tmp = a.out + ".tmp"

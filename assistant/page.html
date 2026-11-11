@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JupyDo - Assistant</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --line: #d0d7de;
+    --me: #e7f0fe; --bot: #f6f8fa; --accent: #f37726; --accent-fg: #ffffff;
+    --card: #ffffff; --warn: #9a6700; --warn-bg: #fff8c5; --err: #cf222e; --err-bg: #ffebe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #8d96a0; --line: #30363d;
+      --me: #1c2d45; --bot: #161b22; --card: #0d1117; --warn: #d29922; --warn-bg: #2b2111;
+      --err: #ff7b72; --err-bg: #2d1214;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--fg); display: flex; flex-direction: column;
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); display: flex;
+           align-items: flex-start; gap: 12px; }
+  header h1 { font-size: 17px; margin: 0; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  header button { margin-left: auto; }
+  main { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 85%; padding: 9px 13px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .me { align-self: flex-end; background: var(--me); border-bottom-right-radius: 4px; }
+  .bot { align-self: flex-start; background: var(--bot); border-bottom-left-radius: 4px; }
+  .note { align-self: center; color: var(--muted); font-size: 13px; }
+  .error { align-self: stretch; background: var(--err-bg); color: var(--err); padding: 9px 13px; border-radius: 8px; }
+  .examples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 999px;
+          padding: 4px 11px; font-size: 13px; cursor: pointer; text-align: left; }
+  .chip:hover { border-color: var(--accent); }
+  .choices { align-self: stretch; display: grid; gap: 10px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--card); }
+  .card h3 { margin: 0; font-size: 15px; }
+  .card code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); overflow-wrap: anywhere; }
+  .card p { margin: 6px 0 0; }
+  .card .why { font-style: italic; }
+  .card .meta { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 13px; color: var(--muted); }
+  .card .meta a { color: inherit; }
+  .card .emulated { color: var(--warn); background: var(--warn-bg); border-radius: 6px; padding: 1px 7px; }
+  .card button { margin-top: 10px; }
+  footer { border-top: 1px solid var(--line); padding: 10px 16px 12px; }
+  form { display: flex; gap: 8px; align-items: flex-end; }
+  textarea { flex: 1; resize: none; min-height: 42px; max-height: 140px; padding: 10px 12px; border-radius: 10px;
+             border: 1px solid var(--line); background: var(--bg); color: var(--fg); font: inherit; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+  button { font: inherit; border-radius: 8px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--line);
+           background: var(--card); color: var(--fg); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  button:disabled { opacity: .55; cursor: default; }
+  .small { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .dots::after { content: "…"; animation: dots 1.2s steps(4) infinite; display: inline-block; width: 1.2em; overflow: hidden; vertical-align: bottom; }
+  @keyframes dots { 0% { width: 0 } 100% { width: 1.2em } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Help me choose an environment</h1>
+    <p>Describe your analysis in your own words, in any language. No Docker knowledge needed.</p>
+  </div>
+  <button id="restart" type="button" title="Start a new conversation">Start over</button>
+</header>
+<main id="chat" aria-live="polite"></main>
+<footer>
+  <form id="form">
+    <textarea id="text" rows="1" placeholder="e.g. I have RNA-seq reads and want to find differentially expressed genes"></textarea>
+    <button class="primary" id="send" type="submit">Send</button>
+  </form>
+  <div class="small">Catalog of {{catalog_size}} images, updated {{catalog_made}}. The images are made by
+    third parties: check the license of the software you use.</div>
+</footer>
+
+<script>
+const base = location.pathname.replace(/\/?$/, "/");
+const chat = document.getElementById("chat"), input = document.getElementById("text"),
+      send = document.getElementById("send");
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const inPanel = window.parent !== window;
+let session = null, busy = false;
+
+const EXAMPLES = [
+  "I have RNA-seq reads and want to find differentially expressed genes",
+  "I have Nanopore reads of a bacterium and want to assemble its genome",
+  "Quality control of my FASTQ files",
+  "Single-cell RNA-seq clustering in R",
+];
+
+async function api(path, body) {
+  const r = await fetch(base + "api/" + path, {method: "POST", credentials: "same-origin",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+function add(cls, html) {
+  const div = document.createElement("div");
+  div.className = cls; div.innerHTML = html;
+  chat.appendChild(div); chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function welcome() {
+  chat.innerHTML = "";
+  const d = add("msg bot", "Hi! What analysis do you want to do? Tell me what data you have and what result " +
+    "you want, and I will find a ready-made environment for it.<div class='examples'></div>");
+  const box = d.querySelector(".examples");
+  EXAMPLES.forEach(t => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "chip"; b.textContent = t;
+    b.onclick = () => { input.value = t; submit(); };
+    box.appendChild(b);
+  });
+}
+
+function choiceCards(reply) {
+  const wrap = add("choices", "");
+  reply.choices.forEach(c => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<h3>${esc(c.name)}</h3><code>${esc(c.image)}</code>
+      <p>${esc(c.description)}</p>${c.why ? `<p class="why">${esc(c.why)}</p>` : ""}
+      <div class="meta"><span>${esc(c.source === "trusted" ? c.organization : ({biocontainers: "BioContainers", staphb: "StaPH-B", dockerhub: "Docker Hub"}[c.source] || c.source))}</span>
+        ${c.native ? "" : `<span class="emulated" title="This image is not built for this server's processor: it runs through emulation">runs emulated here: slower</span>`}
+        ${c.homepage ? `<a href="${esc(c.homepage)}" target="_blank" rel="noopener">website</a>` : ""}
+        ${c.license ? `<span>license: ${esc(c.license)}</span>` : ""}</div>
+      ${(c.also || []).length ? `<div class="meta">also as: ${c.also.map(o => `<code>${esc(o.image)}</code>`).join(", ")}</div>` : ""}
+      <button class="primary" type="button">Use this image</button>`;
+    card.querySelector("button").onclick = () => use(c.image);
+    wrap.appendChild(card);
+  });
+  add("note", "Not what you need? Tell me more below, or start over.");
+}
+
+async function use(image) {
+  const sid = session; session = null;
+  if (sid) api("close", {session: sid, image}).catch(() => {});
+  if (inPanel) {
+    window.parent.postMessage({type: "jupydo-assistant-image", image}, location.origin);
+  } else {
+    add("msg bot", `Copy this image name into the "Custom Image" field of the environment form:\n\n${esc(image)}`);
+    try { await navigator.clipboard.writeText(image); add("note", "Copied to the clipboard."); } catch (e) {}
+  }
+}
+
+async function submit() {
+  const text = input.value.trim();
+  if (!text || busy) return;
+  busy = true; send.disabled = true;
+  add("msg me", esc(text));
+  input.value = ""; resize();
+  let wait;
+  try {
+    if (!session) {
+      wait = add("note dots", "Starting the assistant (a few seconds)");
+      session = (await api("start")).session;
+      wait.remove();
+    }
+    wait = add("note dots", "Thinking");
+    const reply = await api("message", {session, text});
+    wait.remove();
+    if (reply.text) {
+      const d = add("msg bot", esc(reply.text));
+      if (reply.type === "question" && (reply.options || []).length) {
+        const box = document.createElement("div");
+        box.className = "examples";
+        reply.options.forEach(t => {
+          const b = document.createElement("button");
+          b.type = "button"; b.className = "chip"; b.textContent = t;
+          b.onclick = () => { input.value = t; submit(); };
+          box.appendChild(b);
+        });
+        d.appendChild(box);
+      }
+    }
+    if (reply.type === "choices") choiceCards(reply);
+  } catch (e) {
+    if (wait) wait.remove();
+    if (/closed/.test(e.message)) session = null;
+    add("error", esc(e.message));
+  } finally {
+    busy = false; send.disabled = false; input.focus();
+  }
+}
+
+function resize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 140) + "px"; }
+input.addEventListener("input", resize);
+input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } });
+document.getElementById("form").addEventListener("submit", e => { e.preventDefault(); submit(); });
+document.getElementById("restart").onclick = () => {
+  if (session) api("close", {session}).catch(() => {});
+  session = null; welcome(); input.focus();
+};
+// closing the panel or the tab frees the model (the server also closes idle sessions after 10 minutes)
+window.addEventListener("pagehide", () => {
+  if (session) navigator.sendBeacon(base + "api/close", JSON.stringify({session}));
+});
+welcome();
+input.focus();
+</script>
+</body>
+</html>
