@@ -40,6 +40,12 @@ Examples:
 {"terms": ["genome assembly", "assembler", "long read", "nanopore", "bacterial genome"], "tools": ["flye", "unicycler"]}
 - "I want to find differentially expressed genes from my RNA-seq counts" -> \
 {"terms": ["differential expression", "rna-seq", "gene expression", "count matrix"], "tools": ["deseq2", "edger"]}
+- "quality check of my fastq files" -> \
+{"terms": ["quality control", "fastq", "sequencing reads", "read trimming"], "tools": ["fastqc", "multiqc", "fastp"]}
+- "call variants on human exomes, starting from the fastq files" -> \
+{"terms": ["read alignment", "variant calling", "exome", "human genome"], "tools": ["bwa", "gatk4", "samtools"]}
+- "16S metabarcoding of soil samples" -> \
+{"terms": ["metabarcoding", "amplicon", "16S", "microbiome", "taxonomy"], "tools": ["dada2", "qiime2", "cutadapt"]}
 - "I need to do metagenomics" -> {"terms": ["metagenomics", "metagenome", "microbiome"], "tools": []}
 - "I need to analyse single-cell RNA-seq" and then "can I start from the fastq files?" -> \
 {"terms": ["single-cell RNA-seq", "fastq", "read alignment", "quantification", "count matrix"], \

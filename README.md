@@ -8,6 +8,25 @@ JupyDo's spawn form and JupyDo builds the environment as usual.
 It runs on ordinary computers without a GPU: a small language model (Qwen2.5-1.5B-Instruct,
 quantized) served by llama.cpp, started only while someone is using the assistant.
 
+## Try it alone
+
+On any computer with Docker (no GPU needed), from a clone of this repository:
+
+```bash
+scripts/run-local.sh
+```
+
+The first time it downloads the model (1.1 GB, from this repository's release, checked
+against its SHA-256) and the llama.cpp server image; then open
+<http://localhost:10108/services/assistant/>. This is the same service JupyDo runs, without
+login. Ctrl-C stops it.
+
+Tests (no model, no internet; Python 3.9 or newer, with tornado):
+
+```bash
+python3 -m unittest discover -s tests -t .
+```
+
 ## Catalog
 
 `catalog.json` lists the images the assistant can suggest. It is rebuilt every 3 months

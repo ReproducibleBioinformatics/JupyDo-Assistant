@@ -12,8 +12,9 @@ The service (this page + catalog search) is small and always on; the language mo
 
 Configuration (environment variables, besides those of assistant/llm.py):
   ASSISTANT_CATALOG   catalog.json (default: the one of this repository)
-  ASSISTANT_DEV=1     no JupyterHub: no login, listens on ASSISTANT_DEV_PORT (default
-                      10108); for development only
+  ASSISTANT_DEV=1     no JupyterHub: no login, listens on ASSISTANT_DEV_HOST (default
+                      127.0.0.1) and ASSISTANT_DEV_PORT (default 10108); for development
+                      and for trying the assistant alone (scripts/run-local.sh)
 Python 3.9 compatible.
 """
 import json
@@ -136,7 +137,8 @@ def main():
         handlers.append((j("oauth_callback"), HubOAuthCallbackHandler))
     app = web.Application(handlers, cookie_secret=os.urandom(32))
     if DEV:
-        host, port = "127.0.0.1", int(os.environ.get("ASSISTANT_DEV_PORT", "10108"))
+        host = os.environ.get("ASSISTANT_DEV_HOST", "127.0.0.1")
+        port = int(os.environ.get("ASSISTANT_DEV_PORT", "10108"))
     else:
         url = urlparse(os.environ.get("JUPYTERHUB_SERVICE_URL", "http://127.0.0.1:10108"))
         host, port = url.hostname, url.port
