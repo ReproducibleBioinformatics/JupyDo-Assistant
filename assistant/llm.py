@@ -28,6 +28,8 @@ from tornado.httpclient import AsyncHTTPClient, HTTPClientError
 log = logging.getLogger("assistant")
 
 CONTAINER = "jupydo-assistant-llm"
+# llama.cpp server, built from our fork (branch "jupydo") at a fixed commit, amd64 + arm64
+LLM_IMAGE = "ghcr.io/reproduciblebioinformatics/llama-server:ea2dcd49f4345ef954264efa4bd1f757dfb142ab"
 SESSION_IDLE_S = 600
 START_TIMEOUT_S = 120
 
@@ -39,7 +41,7 @@ class LLMError(Exception):
 class LLM:
     def __init__(self):
         self.external_url = os.environ.get("ASSISTANT_LLM_URL", "").rstrip("/")
-        self.image = os.environ.get("ASSISTANT_LLM_IMAGE", "ghcr.io/reproduciblebioinformatics/llama-server:latest")
+        self.image = os.environ.get("ASSISTANT_LLM_IMAGE", LLM_IMAGE)
         self.model_dir = os.environ.get("ASSISTANT_MODEL_DIR", "/srv/JupyDo/assistant")
         self.model_file = os.environ.get("ASSISTANT_MODEL_FILE", "qwen2.5-1.5b-instruct-q4_k_m.gguf")
         self.network = os.environ.get("ASSISTANT_LLM_NETWORK", "jupyterhub_network")
