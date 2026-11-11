@@ -10,9 +10,12 @@ registries, with the same selection rules as the large-scale test of jupydo-buil
                  package on anaconda.org; for each tool, its most recent tag
   staphb         ALL the repositories of the StaPH-B organization on Docker Hub;
                  for each, its most recent version tag
-  dockerhub      the K most pulled Docker Hub repositories found by a search for
-                 "bioinformatics" (repositories of the two sets above left out); for
-                 each, its most recent version tag
+  dockerhub      for each search word (SEARCH_WORDS: "bioinformatics", "bioconductor",
+                 "cran", "python", "single-cell", ...), the K most pulled Docker Hub repositories that have that WHOLE word in
+                 their name or description (Docker Hub also returns parts of words:
+                 "cran" finds "crane"); repositories of the two sets above, and those
+                 already found by an earlier word, left out; for each, its most recent
+                 version tag
 
 Differences from make-lists.py (the catalog suggests images, it does not test them):
   - every image has a DESCRIPTION (what the tool does): the summary of the Bioconda
@@ -25,6 +28,7 @@ Differences from make-lists.py (the catalog suggests images, it does not test th
   - the output is one JSON file, not a .tsv.
 
 Usage: scripts/make-catalog.py [--n-biocontainers 3000] [--top-dockerhub 100]
+                               [--search WORD [WORD ...]]
                                [--out catalog.json] [--workers 8]
 Needs internet (quay.io, anaconda.org, hub.docker.com). Docker Hub shows anonymous
 requests only the first 100 results of any list: the requests are made with the
@@ -50,6 +54,12 @@ import urllib.request
 UA = {"User-Agent": "JupyDo-assistant-catalog/1.0"}
 ARCHS = ("amd64", "arm64")   # the architectures JupyDo runs on
 SCHEMA = 1                   # version of the format of catalog.json
+# Words searched on Docker Hub: the field, the languages and environments the analyses
+# run in, the kinds of data, the workflow systems ('single-cell' also finds 'single cell')
+SEARCH_WORDS = ["bioinformatics", "bioconductor", "cran", "rstudio", "r", "python", "jupyter", "genomics",
+                "sequencing", "ngs", "rnaseq", "rna-seq", "single-cell", "10x", "proteomics",
+                "metabolomics", "metagenomics", "microbiome", "phylogenetics", "nextflow",
+                "nf-core", "galaxy"]
 
 
 def hub_credentials():
@@ -213,11 +223,31 @@ def quay_architectures(repo, digest, tries=4):
             time.sleep(10 * (i + 1))
 
 
+def version_key(tag):
+    """Sort key of a BioContainers tag '<version>--<build>' (e.g. '1.25--h9dcdb79_0'):
+    the version compared number by number ('2.31.1' > '2.27.1' > '2.9'), then the
+    build number. Numbers sort after letters, so '1.0' > '1.0b2'."""
+    version, _, build = tag.partition("--")
+    def parts(text):
+        return [(1, int(x), "") if x.isdigit() else (0, 0, x) for x in re.findall(r"\d+|[a-z]+", text.lower())]
+    build_number = re.search(r"(\d+)$", build)
+    return parts(version), int(build_number.group(1)) if build_number else 0
+
+
 def quay_latest(namespace, name):
-    """The most recent tag of the tool and the architectures of its image, or None."""
-    data = get(f"https://quay.io/api/v1/repository/{namespace}/{name}/tag/?onlyActiveTags=true&limit=100")
-    tags = sorted((t for t in data.get("tags", []) if t.get("manifest_digest") and t.get("name") != "latest"),
-                  key=lambda t: t.get("start_ts", 0), reverse=True)
+    """The tag with the highest version of the tool and the architectures of its
+    image, or None. By version, not by date: in 2024 BioContainers pushed many old
+    tags again, so their dates are recent (samtools 0.1.19 newer than 1.24)."""
+    tags, page = [], 1
+    while True:
+        data = get(f"https://quay.io/api/v1/repository/{namespace}/{name}/tag/"
+                   f"?onlyActiveTags=true&limit=100&page={page}")
+        tags += data.get("tags", [])
+        if not data.get("has_additional"):
+            break
+        page += 1
+    tags = sorted((t for t in tags if t.get("manifest_digest") and t.get("name") != "latest"),
+                  key=lambda t: version_key(t["name"]), reverse=True)
     if not tags:
         return None
     t = tags[0]
@@ -259,17 +289,24 @@ def hub_search(query, pages):
     return found
 
 
+DEV_TAG = re.compile(r"(?<![a-z])(devel|develop|development|dev|test|testing|rc|beta|alpha|nightly|preview|snapshot)"
+                     r"\d*(?![a-z])")
+
+
 def hub_latest(repo):
     """Most recent tag (other than 'latest') with a linux image for amd64 or arm64,
-    and the architectures it is published for; 'latest' if there is no other."""
+    and the architectures it is published for; 'latest' if there is no other. Tags of
+    development versions (devel, test, rc, beta...) only if there is nothing else."""
     data = get(f"https://hub.docker.com/v2/repositories/{repo}/tags?page_size=50&ordering=last_updated")
     time.sleep(0.5)
     def archs(t):
         return sorted({i.get("architecture") for i in t.get("images") or []
                        if i.get("os") == "linux" and i.get("architecture") in ARCHS})
-    for want_latest in (False, True):
+    def kind(t):   # 0 a release, 1 'latest', 2 a development tag
+        return 1 if t["name"] == "latest" else 2 if DEV_TAG.search(t["name"].lower()) else 0
+    for want in (0, 1, 2):
         for t in data.get("results", []):
-            if (t["name"] == "latest") == want_latest and archs(t):
+            if kind(t) == want and archs(t):
                 return {"tag": t["name"], "archs": archs(t), "updated": (t.get("last_updated") or "")[:10]}
     return None
 
@@ -339,8 +376,12 @@ def set_biocontainers(a, stats):
 def hub_entry(source, repo, pulls, description, stats):
     """Many repositories have no short description on Docker Hub (StaPH-B's pages all
     show the same generic README): the summary of the Bioconda package with the same
-    name is used instead, and the entry says so."""
+    name is used instead, and the entry says so. Repositories whose description says
+    they are deprecated are left out."""
     description, origin = clean(description), "docker hub"
+    if has_word("deprecated", description):
+        stats["deprecated"] = stats.get("deprecated", 0) + 1
+        return None
     if not description:
         try:
             description, origin = clean(bioconda_package(short(repo).split("/")[-1]).get("summary")), "bioconda"
@@ -376,28 +417,45 @@ def set_staphb(a, stats):
     return entries
 
 
+def has_word(word, text):
+    """True if the text has the whole word (any case; '-', '_' and spaces are the same):
+    'cran' is in 'CRAN packages', not in 'crane'; 'single-cell' is in 'Single Cell'."""
+    def norm(t):
+        return re.sub(r"[-_\s]+", " ", t.lower())
+    return re.search(r"(?<![a-z0-9])" + re.escape(norm(word)) + r"(?![a-z0-9])", norm(text)) is not None
+
+
 def set_dockerhub(a, stats):
-    found = hub_search("bioinformatics", a.search_pages)
-    ranked = sorted(((p, r, d) for r, (p, d) in found.items()
-                     if not r.startswith(("staphb/", "biocontainers/"))), key=lambda x: (-x[0], x[1]))
-    entries, examined = [], 0
-    for pulls, repo, description in ranked:
-        if len(entries) >= a.top_dockerhub:
-            break
-        examined += 1
-        e = hub_entry("dockerhub", repo, pulls, description, stats)
-        if e:
-            entries.append(e)
-        print(f"\r  {len(entries)}/{a.top_dockerhub} (looked at {examined} of {len(ranked)})", end="", file=sys.stderr)
-    print(file=sys.stderr)
-    stats["measure"], stats["examined"] = "Docker Hub pulls", examined
+    entries, taken = [], set()
+    for word in a.search:
+        found = hub_search(word, a.search_pages)
+        ranked = sorted(((p, r, d) for r, (p, d) in found.items()
+                         if not r.startswith(("staphb/", "biocontainers/")) and r not in taken
+                         and has_word(word, r.replace("/", " ") + " " + d)), key=lambda x: (-x[0], x[1]))
+        n, examined = 0, 0
+        for pulls, repo, description in ranked:
+            if n >= a.top_dockerhub:
+                break
+            examined += 1
+            e = hub_entry("dockerhub", repo, pulls, description, stats)
+            if e:
+                e["found_by"] = word
+                entries.append(e)
+                taken.add(repo)
+                n += 1
+            print(f"\r  {word}: {n}/{a.top_dockerhub} (looked at {examined} of {len(ranked)} with the whole word,"
+                  f" {len(found)} results)", end="", file=sys.stderr)
+        print(file=sys.stderr)
+        stats["examined: " + word] = examined
+    stats["measure"] = "Docker Hub pulls"
     return entries
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--n-biocontainers", type=int, default=3000)
-    ap.add_argument("--top-dockerhub", type=int, default=100)
+    ap.add_argument("--top-dockerhub", type=int, default=100, help="Docker Hub repositories per search word")
+    ap.add_argument("--search", nargs="+", default=SEARCH_WORDS, help="the words searched on Docker Hub")
     ap.add_argument("--search-pages", type=int, default=20)
     ap.add_argument("--workers", type=int, default=8, help="parallel requests to quay.io and anaconda.org")
     ap.add_argument("--out", default="catalog.json")
@@ -430,13 +488,13 @@ def main():
     hub_login()
     print("staphb  Docker Hub, all", file=sys.stderr)
     images += run("staphb", 0, set_staphb)
-    print('dockerhub  Docker Hub search "bioinformatics", by pulls', file=sys.stderr)
-    images += run("dockerhub", [a.top_dockerhub, a.search_pages], set_dockerhub)
+    print(f"dockerhub  Docker Hub search {', '.join(a.search)}, by pulls", file=sys.stderr)
+    images += run("dockerhub", [a.top_dockerhub, a.search_pages, a.search], set_dockerhub)
 
     counts = {s: sum(1 for i in images if i["source"] == s) for s in ("biocontainers", "staphb", "dockerhub")}
     catalog = {"schema": SCHEMA, "made": today, "made_by": "scripts/make-catalog.py",
                "rules": {"n_biocontainers": a.n_biocontainers, "top_dockerhub": a.top_dockerhub,
-                         "search_pages": a.search_pages},
+                         "search": a.search, "search_pages": a.search_pages},
                "counts": counts, "left_out": stats, "images": images}
     tmp = a.out + ".tmp"
     with open(tmp, "w") as f:
