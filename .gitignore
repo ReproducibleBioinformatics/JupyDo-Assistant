@@ -1,3 +1,4 @@
 .partial-*.json
 *.tmp
 __pycache__/
+CLAUDE.md
