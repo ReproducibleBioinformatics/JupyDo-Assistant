@@ -109,7 +109,7 @@ class Catalog:
         """The images that match the terms of the analysis and the tool names, best
         first (at most `limit`). Each comes with its 'score', 'relevance' (how well it
         matches the terms and tools), 'term_relevance' (the terms only: how well it fits
-        the analysis, whatever its name) and 'native' (True if it runs without emulation
+        the analysis, whatever its name), 'tool_relevance' (the tool names only) and 'native' (True if it runs without emulation
         on `arch`). Tool names count only on the image's name: a generic word such as
         "taxonomy" must go in the terms, or a library called "taxonomy" would win."""
         arch = arch or machine_arch()
@@ -125,7 +125,8 @@ class Catalog:
             found.append((score, image, native, r, t))
         found.sort(key=lambda x: (-x[0], x[1]["image"]))
         return [dict({k: v for k, v in image.items() if not k.startswith("_")},
-                     score=round(score, 2), relevance=round(r, 2), term_relevance=round(t, 2), native=native)
+                     score=round(score, 2), relevance=round(r, 2), term_relevance=round(t, 2),
+                     tool_relevance=round(r - t, 2), native=native)
                 for score, image, native, r, t in found[:limit]]
 
 

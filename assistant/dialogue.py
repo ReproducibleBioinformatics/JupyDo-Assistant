@@ -5,11 +5,14 @@ At every user message:
      of the analysis ("variant calling", "long read") and names of well-known tools
      ("bcftools");
   2. the code searches the catalog with them (assistant/catalog.py);
-  3. the CODE decides what comes next: if the request is still vague (the model could
-     name no well-known tool for it) and too many tools fit the analysis (counting only
-     the terms), and fewer than MAX_QUESTIONS were asked, the model must ask ONE question (it writes the question and 2-4 possible
-     answers itself, looking at the candidates); otherwise it must choose 1-3 tools,
-     ONLY among the candidates: the JSON schema lets it write only their names.
+  3. the CODE decides what comes next:
+     - if some of the tools the model named are in the catalog, those are the answer
+       (at most 3): the model knows the standard tools of an analysis well (DESeq2,
+       DADA2...) but chooses badly from a long list; it only explains them;
+     - otherwise, at the first message (a vague request), the model asks ONE question
+       (it writes the question and 2-4 possible answers, looking at the candidates);
+     - otherwise it chooses 1-3 tools ONLY among the candidates: the JSON schema lets it
+       write only their names.
 The same tool can be in the catalog more than once (e.g. BioContainers and StaPH-B):
 the model sees it once, and the reply gives the best image plus the others.
 The assistant always writes in English, whatever the user's language.
@@ -23,9 +26,7 @@ log = logging.getLogger("assistant")
 
 CANDIDATES = 20       # images taken from the search
 TOOLS_SHOWN = 12      # different tools shown to the model
-STRONG = 0.75         # a tool fits the analysis well if its term relevance is >= 75% of the best
-MAX_STRONG = 3        # more tools than this fit well (and no tool named): ask a question
-MAX_QUESTIONS = 2     # then choose anyway
+MAX_QUESTIONS = 1     # then choose anyway
 
 KEYWORDS_PROMPT = """You turn a biologist's request into search keywords for a catalog of \
 bioinformatics software (each entry: tool name + one-line description, in English).
@@ -40,6 +41,10 @@ Examples:
 - "I want to find differentially expressed genes from my RNA-seq counts" -> \
 {"terms": ["differential expression", "rna-seq", "gene expression", "count matrix"], "tools": ["deseq2", "edger"]}
 - "I need to do metagenomics" -> {"terms": ["metagenomics", "metagenome", "microbiome"], "tools": []}
+- "I need to analyse single-cell RNA-seq" and then "can I start from the fastq files?" -> \
+{"terms": ["single-cell RNA-seq", "fastq", "read alignment", "quantification", "count matrix"], \
+"tools": ["alevin-fry", "kb-python", "star"]}
+(a later message adds a detail: keep the main subject of the conversation in the terms)
 Answer ONLY with JSON."""
 
 KEYWORDS_SCHEMA = {"type": "object", "properties": {
@@ -75,8 +80,10 @@ ASK_SCHEMA = {"type": "object", "properties": {
 CHOOSE_PROMPT = """You help a biologist choose a software container for an analysis. \
 Choose the 1 to 3 tools that best fit the request, ONLY from this list:
 {candidates}
-Prefer tools that do exactly what was asked. For each one, write one short sentence \
-saying why it fits, about THAT tool. Then a short message for the user. Write in English.
+Prefer tools that do exactly what was asked. If the analysis has several steps and the \
+user starts from raw data (e.g. FASTQ files), choose tools for the FIRST step, and say in \
+the message which steps come next. For each tool, write one short sentence saying why it \
+fits, about THAT tool. Then a short message for the user. Write in English.
 Answer ONLY with JSON: {{"choices": [{{"tool": "...", "why": "..."}}], "message": "..."}}"""
 
 
@@ -145,16 +152,18 @@ class Conversation:
             log.info("keywords %s -> nothing", keywords)
             return self._reply({"type": "nothing", "text": NOTHING, "keywords": keywords})
         groups = by_tool(found)
-        best = max(images[0]["term_relevance"] for _, images in groups)
-        strong = [n for n, images in groups if best > 0 and images[0]["term_relevance"] >= STRONG * best]
-        log.info("keywords %s -> %d tools, %d fit the analysis well", keywords, len(groups), len(strong))
-        if not tools and len(strong) > MAX_STRONG and self.questions < MAX_QUESTIONS:
-            question, options = await self._ask(groups)
+        # the tools the model named for this analysis, when the catalog has them: the model
+        # knows the standard tools well, but chooses badly from a long list
+        named = [(n, images) for n, images in groups if images[0]["tool_relevance"] >= 4]
+        log.info("keywords %s -> %d tools, named and in the catalog: %s", keywords, len(groups),
+                 [n for n, _ in named])
+        if not named and len(self.history) == 1 and self.questions < MAX_QUESTIONS:
+            question, options = await self._ask(groups)   # a vague first request
             if question:
                 self.questions += 1
                 return self._reply({"type": "question", "text": question, "options": options,
                                     "keywords": keywords})
-        return self._reply(await self._choose(groups, keywords))
+        return self._reply(await self._choose(named[:3] or groups, keywords))
 
     async def _ask(self, groups):
         messages = ([{"role": "system", "content": ASK_PROMPT.format(candidates=listing(groups))}]
