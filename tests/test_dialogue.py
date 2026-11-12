@@ -101,13 +101,23 @@ class Dialogue(unittest.TestCase):
 
 
 class PickNamed(unittest.TestCase):
-    def test_exact_name_before_name_inside(self):
-        groups = [("r-seurat", [{"image": "quay.io/biocontainers/r-seurat:3.0.2"}]),
-                  ("seurat", [{"image": "satijalab/seurat:6.0.0"}]),
-                  ("bioconductor-deseq2", [{"image": "quay.io/biocontainers/bioconductor-deseq2:1.50"}])]
-        self.assertEqual([n for n, _ in pick_named(groups, ["Seurat", "deseq2", "unknown"])],
-                         ["seurat", "bioconductor-deseq2"])
-
+    def test_exact_name_then_most_used_name_inside(self):
+        from tests.test_catalog import image
+        images = [image("r-seurat", "Seurat toolkit, old", use=500),
+                  image("satijalab/seurat", "Builds of CRAN releases of Seurat", source="dockerhub", use=90000),
+                  image("r-empiricalfdr.deseq2", "Simulation-based false discovery rate in RNA-seq", use=3),
+                  image("bioconductor-deseq2", "Differential gene expression analysis", use=900)]
+        for i in images:
+            i["name"] = i["name"].split("/")[-1]
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump({"made": "2026-01-01", "images": images}, f)
+        try:
+            picked = pick_named(Catalog(path), ["Seurat", "deseq2", "unknown"])
+        finally:
+            os.remove(path)
+        self.assertEqual([imgs[0]["image"] for _, imgs in picked],
+                         ["satijalab/seurat:1.0", "quay.io/biocontainers/bioconductor-deseq2:1.0"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -113,7 +113,7 @@ NOTHING = ("I could not find anything that fits in the catalog. Could you descri
            "in other words (what data you have, what result you want)?")
 
 
-def by_tool(found):
+def by_tool(found, limit=TOOLS_SHOWN):
     """The search results grouped by tool name, best tool first: [(name, [images])].
     Inside a group the images are ordered by trust, not by their description: by source
     (SOURCE_ORDER), then native to this machine, then the most used (a personal
@@ -124,21 +124,26 @@ def by_tool(found):
     for images in groups.values():
         images.sort(key=lambda i: (SOURCE_ORDER.get(i["source"], len(SOURCE_ORDER)), not i["native"],
                                    -(i.get("use") or 0)))
-    return list(groups.items())[:TOOLS_SHOWN]
+    return list(groups.items())[:limit]
 
 
-def pick_named(groups, tools):
-    """For each tool the model named (in its order, at most 3), the best image of the
-    catalog with that exact name ("seurat" -> satijalab/seurat), or else with that name
-    inside its name ("deseq2" -> bioconductor-deseq2). The groups are best first."""
+def pick_named(catalog, tools):
+    """For each tool the model named (in its order, at most 3), its most trusted image in
+    the WHOLE catalog (not only among the search results): the tool with that exact name
+    ("seurat" -> satijalab/seurat, not r-seurat), or else the most used tool with that
+    name inside its name ("deseq2" -> bioconductor-deseq2, not r-empiricalfdr.deseq2)."""
     def bare(name):   # "Kb-Python" -> "kbpython" (every letter kept: "r-seurat" is not "seurat")
         return re.sub(r"[^a-z0-9]", "", name.lower())
     picked = []
     for tool in tools:
+        if not bare(tool):
+            continue
+        groups = by_tool(catalog.search([], [tool], limit=500), limit=None)
         exact = [g for g in groups if bare(g[0]) == bare(tool)]
-        inside = [g for g in groups if bare(tool) and bare(tool) in words(g[0])]
+        inside = sorted((g for g in groups if bare(tool) in words(g[0])),
+                        key=lambda g: (SOURCE_ORDER.get(g[1][0]["source"], 9), -(g[1][0].get("use") or 0)))
         for g in (exact or inside)[:1]:
-            if g not in picked:
+            if g[0] not in [p[0] for p in picked]:
                 picked.append(g)
     return picked[:3]
 
@@ -186,7 +191,7 @@ class Conversation:
         groups = by_tool(found)
         # the tools the model named for this analysis, when the catalog has them: the model
         # knows the standard tools well, but chooses badly from a long list
-        named = pick_named(groups, tools)
+        named = pick_named(self.catalog, tools)
         log.info("keywords %s -> %d tools, named and in the catalog: %s", keywords, len(groups),
                  [n for n, _ in named])
         if not named and len(self.history) == 1 and self.questions < MAX_QUESTIONS:
