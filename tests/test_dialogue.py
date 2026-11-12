@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from assistant.catalog import Catalog
-from assistant.dialogue import Conversation
+from assistant.dialogue import Conversation, pick_named
 from assistant.llm import LLMError
 from tests.test_catalog import IMAGES
 
@@ -98,6 +98,15 @@ class Dialogue(unittest.TestCase):
         run(conv.answer("first"))
         run(conv.answer("second"))
         self.assertEqual([m["role"] for m in conv.history], ["user", "assistant", "user", "assistant"])
+
+
+class PickNamed(unittest.TestCase):
+    def test_exact_name_before_name_inside(self):
+        groups = [("r-seurat", [{"image": "quay.io/biocontainers/r-seurat:3.0.2"}]),
+                  ("seurat", [{"image": "satijalab/seurat:6.0.0"}]),
+                  ("bioconductor-deseq2", [{"image": "quay.io/biocontainers/bioconductor-deseq2:1.50"}])]
+        self.assertEqual([n for n, _ in pick_named(groups, ["Seurat", "deseq2", "unknown"])],
+                         ["seurat", "bioconductor-deseq2"])
 
 
 if __name__ == "__main__":

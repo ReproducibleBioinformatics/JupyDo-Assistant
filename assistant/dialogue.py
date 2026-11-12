@@ -7,8 +7,9 @@ At every user message:
   2. the code searches the catalog with them (assistant/catalog.py);
   3. the CODE decides what comes next:
      - if some of the tools the model named are in the catalog, those are the answer
-       (at most 3): the model knows the standard tools of an analysis well (DESeq2,
-       DADA2...) but chooses badly from a long list; it only explains them;
+       (at most 3, each with its best image of that exact name): the model knows the
+       standard tools of an analysis well (DESeq2, DADA2...) but chooses badly from a
+       list, even a short one; it only explains them;
      - otherwise, at the first message (a vague request), the model asks ONE question
        (it writes the question and 2-4 possible answers, looking at the candidates);
      - otherwise it chooses 1-3 tools ONLY among the candidates: the JSON schema lets it
@@ -19,13 +20,18 @@ The assistant always writes in English, whatever the user's language.
 Python 3.9 compatible.
 """
 import logging
+import re
 
+from .catalog import words
 from .llm import LLMError
 
 log = logging.getLogger("assistant")
 
-CANDIDATES = 20       # images taken from the search
+CANDIDATES = 80       # images taken from the search (the same tool can be there many times)
 TOOLS_SHOWN = 12      # different tools shown to the model
+# the same tool from several sources: the makers' own image, then BioContainers (usually
+# the newest version), then StaPH-B, then any other Docker Hub repository
+SOURCE_ORDER = {"trusted": 0, "biocontainers": 1, "staphb": 2, "dockerhub": 3}
 MAX_QUESTIONS = 1     # then choose anyway
 
 KEYWORDS_PROMPT = """You turn a biologist's request into search keywords for a catalog of \
@@ -47,10 +53,8 @@ Examples:
 - "16S metabarcoding of soil samples" -> \
 {"terms": ["metabarcoding", "amplicon", "16S", "microbiome", "taxonomy"], "tools": ["dada2", "qiime2", "cutadapt"]}
 - "I need to do metagenomics" -> {"terms": ["metagenomics", "metagenome", "microbiome"], "tools": []}
-- "I need to analyse single-cell RNA-seq" and then "can I start from the fastq files?" -> \
-{"terms": ["single-cell RNA-seq", "fastq", "read alignment", "quantification", "count matrix"], \
-"tools": ["alevin-fry", "kb-python", "star"]}
-(a later message adds a detail: keep the main subject of the conversation in the terms)
+When the conversation has several messages, a later message adds a detail to the first one: \
+keep the main subject of the FIRST message in the terms, and add the new detail.
 Answer ONLY with JSON."""
 
 KEYWORDS_SCHEMA = {"type": "object", "properties": {
@@ -110,11 +114,33 @@ NOTHING = ("I could not find anything that fits in the catalog. Could you descri
 
 
 def by_tool(found):
-    """The search results grouped by tool name, best first: [(name, [images, best first])]."""
+    """The search results grouped by tool name, best tool first: [(name, [images])].
+    Inside a group the images are ordered by trust, not by their description: by source
+    (SOURCE_ORDER), then native to this machine, then the most used (a personal
+    "rstudio" image whose description repeats more keywords must not beat rocker/rstudio)."""
     groups = {}
     for image in found:
         groups.setdefault(image["name"], []).append(image)
+    for images in groups.values():
+        images.sort(key=lambda i: (SOURCE_ORDER.get(i["source"], len(SOURCE_ORDER)), not i["native"],
+                                   -(i.get("use") or 0)))
     return list(groups.items())[:TOOLS_SHOWN]
+
+
+def pick_named(groups, tools):
+    """For each tool the model named (in its order, at most 3), the best image of the
+    catalog with that exact name ("seurat" -> satijalab/seurat), or else with that name
+    inside its name ("deseq2" -> bioconductor-deseq2). The groups are best first."""
+    def bare(name):   # "Kb-Python" -> "kbpython" (every letter kept: "r-seurat" is not "seurat")
+        return re.sub(r"[^a-z0-9]", "", name.lower())
+    picked = []
+    for tool in tools:
+        exact = [g for g in groups if bare(g[0]) == bare(tool)]
+        inside = [g for g in groups if bare(tool) and bare(tool) in words(g[0])]
+        for g in (exact or inside)[:1]:
+            if g not in picked:
+                picked.append(g)
+    return picked[:3]
 
 
 def listing(tools):
@@ -160,7 +186,7 @@ class Conversation:
         groups = by_tool(found)
         # the tools the model named for this analysis, when the catalog has them: the model
         # knows the standard tools well, but chooses badly from a long list
-        named = [(n, images) for n, images in groups if images[0]["tool_relevance"] >= 4]
+        named = pick_named(groups, tools)
         log.info("keywords %s -> %d tools, named and in the catalog: %s", keywords, len(groups),
                  [n for n, _ in named])
         if not named and len(self.history) == 1 and self.questions < MAX_QUESTIONS:
@@ -169,7 +195,7 @@ class Conversation:
                 self.questions += 1
                 return self._reply({"type": "question", "text": question, "options": options,
                                     "keywords": keywords})
-        return self._reply(await self._choose(named[:3] or groups, keywords))
+        return self._reply(await self._choose(named or groups, keywords))
 
     async def _ask(self, groups):
         messages = ([{"role": "system", "content": ASK_PROMPT.format(candidates=listing(groups))}]
