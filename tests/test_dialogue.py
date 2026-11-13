@@ -46,7 +46,7 @@ class Dialogue(unittest.TestCase):
         os.remove(cls.path)
 
     def test_named_tools_in_the_catalog_are_the_answer(self):
-        llm = FakeLLM(keywords=[{"terms": ["variant calling"], "tools": ["freebayes", "bcftools", "gatk4"]}],
+        llm = FakeLLM(keywords=[{"terms": ["variant calling", "genotyping"], "tools": ["freebayes", "bcftools", "gatk4"]}],
                       choose=[{"choices": [{"tool": "freebayes", "why": "calls variants"}], "message": "ok"}])
         r = run(Conversation(self.catalog, llm).answer("I want to call variants"))
         self.assertEqual(r["type"], "choices")
@@ -99,6 +99,13 @@ class Dialogue(unittest.TestCase):
         run(conv.answer("second"))
         self.assertEqual([m["role"] for m in conv.history], ["user", "assistant", "user", "assistant"])
 
+    def test_namesake_that_does_not_fit_the_analysis_is_skipped(self):
+        llm = FakeLLM(keywords=[{"terms": ["assembler", "long reads"], "tools": ["taxonomy", "flye"]}],
+                      choose=[{"choices": [{"tool": "flye", "why": "assembles"}], "message": ""}])
+        run(Conversation(self.catalog, llm).answer("assemble long reads"))
+        enum = llm.calls[-1][1]["properties"]["choices"]["items"]["properties"]["tool"]["enum"]
+        self.assertEqual(enum, ["flye"])   # "taxonomy" (a library of that name) does not fit
+
 
 class PickNamed(unittest.TestCase):
     def test_exact_name_then_most_used_name_inside(self):
@@ -118,6 +125,7 @@ class PickNamed(unittest.TestCase):
             os.remove(path)
         self.assertEqual([imgs[0]["image"] for _, imgs in picked],
                          ["satijalab/seurat:1.0", "quay.io/biocontainers/bioconductor-deseq2:1.0"])
+
 
 if __name__ == "__main__":
     unittest.main()

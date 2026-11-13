@@ -31,6 +31,7 @@ CANDIDATES = 80       # images taken from the search (the same tool can be there
 TOOLS_SHOWN = 12      # different tools shown to the model
 # the same tool from several sources: the makers' own image, then BioContainers (usually
 # the newest version), then StaPH-B, then any other Docker Hub repository
+WELL_KNOWN = 0.95     # the 5% most used BioContainers: named by the model, they need no other check
 SOURCE_ORDER = {"trusted": 0, "biocontainers": 1, "staphb": 2, "dockerhub": 3}
 MAX_QUESTIONS = 1     # then choose anyway
 
@@ -52,6 +53,9 @@ Examples:
 {"terms": ["read alignment", "variant calling", "exome", "human genome"], "tools": ["bwa", "gatk4", "samtools"]}
 - "16S metabarcoding of soil samples" -> \
 {"terms": ["metabarcoding", "amplicon", "16S", "microbiome", "taxonomy"], "tools": ["dada2", "qiime2", "cutadapt"]}
+- "clustering and cell types of my single-cell data" -> \
+{"terms": ["single-cell RNA-seq", "clustering", "cell type annotation", "dimensionality reduction"], \
+"tools": ["seurat", "scanpy"]}
 - "I need to do metagenomics" -> {"terms": ["metagenomics", "metagenome", "microbiome"], "tools": []}
 When the conversation has several messages, a later message adds a detail to the first one: \
 keep the main subject of the FIRST message in the terms, and add the new detail.
@@ -127,22 +131,31 @@ def by_tool(found, limit=TOOLS_SHOWN):
     return list(groups.items())[:limit]
 
 
-def pick_named(catalog, tools):
+def pick_named(catalog, tools, terms=()):
     """For each tool the model named (in its order, at most 3), its most trusted image in
     the WHOLE catalog (not only among the search results): the tool with that exact name
     ("seurat" -> satijalab/seurat, not r-seurat), or else the most used tool with that
-    name inside its name ("deseq2" -> bioconductor-deseq2, not r-empiricalfdr.deseq2)."""
+    name inside its name ("deseq2" -> bioconductor-deseq2, not r-empiricalfdr.deseq2).
+    A BioContainers tool must also fit the analysis: its description (the Bioconda
+    summary, reliable) must match some of the terms, or it must be one of the most used
+    (samtools: "Tools for dealing with SAM, BAM and CRAM files"); otherwise a namesake
+    is skipped ("umap", meant as UMAP, is in the catalog a genome mappability tool). Docker Hub descriptions
+    are often too short to judge ("Builds of CRAN releases of Seurat"): not checked."""
     def bare(name):   # "Kb-Python" -> "kbpython" (every letter kept: "r-seurat" is not "seurat")
         return re.sub(r"[^a-z0-9]", "", name.lower())
+    def fits(group):
+        best = group[1][0]
+        return (not terms or best["source"] != "biocontainers" or best["term_relevance"] > 0
+                or best["use_rank"] >= WELL_KNOWN)
     picked = []
     for tool in tools:
         if not bare(tool):
             continue
-        groups = by_tool(catalog.search([], [tool], limit=500), limit=None)
-        exact = [g for g in groups if bare(g[0]) == bare(tool)]
-        inside = sorted((g for g in groups if bare(tool) in words(g[0])),
+        groups = by_tool(catalog.search(list(terms), [tool], limit=500), limit=None)
+        exact = [g for g in groups if bare(g[0]) == bare(tool) and g[1][0]["tool_relevance"] > 0]
+        inside = sorted((g for g in groups if bare(tool) in words(g[0]) and g[1][0]["tool_relevance"] > 0),
                         key=lambda g: (SOURCE_ORDER.get(g[1][0]["source"], 9), -(g[1][0].get("use") or 0)))
-        for g in (exact or inside)[:1]:
+        for g in [g for g in (exact or inside) if fits(g)][:1]:
             if g[0] not in [p[0] for p in picked]:
                 picked.append(g)
     return picked[:3]
@@ -191,7 +204,7 @@ class Conversation:
         groups = by_tool(found)
         # the tools the model named for this analysis, when the catalog has them: the model
         # knows the standard tools well, but chooses badly from a long list
-        named = pick_named(self.catalog, tools)
+        named = pick_named(self.catalog, tools, terms)
         log.info("keywords %s -> %d tools, named and in the catalog: %s", keywords, len(groups),
                  [n for n, _ in named])
         if not named and len(self.history) == 1 and self.questions < MAX_QUESTIONS:
